@@ -4,24 +4,24 @@ use std::cmp::Ord;
 use std::mem;
 use std::ops::Index;
 use std::ops::IndexMut;
-use std::ptr::NonNull;
+use std::ptr;
 
 const MAX_LEVEL: usize = 20;
 
 struct Tower<K, V> {
-    forward: [Option<NonNull<Node<K, V>>>; 0],
+    forward: [*mut Node<K, V>; 0],
 }
 
 impl<K, V> Index<usize> for Tower<K, V> {
-    type Output = Option<NonNull<Node<K, V>>>;
+    type Output = *mut Node<K, V>;
 
-    fn index(&self, index: usize) -> &Option<NonNull<Node<K, V>>> {
+    fn index(&self, index: usize) -> &*mut Node<K, V> {
         unsafe { self.forward.get_unchecked(index) }
     }
 }
 
 impl<K, V> IndexMut<usize> for Tower<K, V> {
-    fn index_mut(&mut self, index: usize) -> &mut Option<NonNull<Node<K, V>>> {
+    fn index_mut(&mut self, index: usize) -> &mut *mut Node<K, V> {
         unsafe { self.forward.get_unchecked_mut(index) }
     }
 }
@@ -39,7 +39,7 @@ impl<K, V> Node<K, V> {
         let size = mem::size_of::<K>()
             + mem::size_of::<V>()
             + mem::size_of::<Layout>()
-            + height * mem::size_of::<Option<NonNull<Node<K, V>>>>();
+            + height * mem::size_of::<*mut Node<K, V>>();
         match Layout::from_size_align(size, 16) {
             Ok(layout) => unsafe {
                 let ptr = alloc(layout) as *mut Node<K, V>;
@@ -48,7 +48,7 @@ impl<K, V> Node<K, V> {
                 }
                 (*ptr).layout = layout;
                 for i in 0..height {
-                    (*ptr).tower[i] = None;
+                    (*ptr).tower[i] = ptr::null_mut();
                 }
                 ptr
             },
@@ -56,24 +56,24 @@ impl<K, V> Node<K, V> {
         }
     }
 
-    pub fn new(key: K, val: V, height: usize) -> Option<NonNull<Node<K, V>>> {
+    pub fn new(key: K, val: V, height: usize) -> *mut Node<K, V> {
         let ptr = Node::alloc(height);
         if ptr.is_null() {
-            return None;
+            return ptr::null_mut();
         }
         unsafe {
             (*ptr).key = key;
             (*ptr).val = val;
         }
-        NonNull::new(ptr)
+        ptr
     }
 
-    pub fn new_uninit(height: usize) -> Option<NonNull<Node<K, V>>> {
+    pub fn new_uninit(height: usize) -> *mut Node<K, V> {
         let ptr = Node::alloc(height);
         if ptr.is_null() {
-            return None;
+            return ptr::null_mut();
         }
-        NonNull::new(ptr)
+        ptr
     }
 }
 
@@ -86,7 +86,7 @@ fn rand_lvl() -> usize {
 }
 
 pub struct SkipList<K, V> {
-    head: NonNull<Node<K, V>>,
+    head: *mut Node<K, V>,
     size: usize,
     level: usize,
 }
@@ -94,29 +94,27 @@ pub struct SkipList<K, V> {
 impl<K: Ord, V> SkipList<K, V> {
     pub fn new() -> Self {
         Self {
-            head: Node::new_uninit(MAX_LEVEL).unwrap(),
+            head: Node::new_uninit(MAX_LEVEL),
             size: 0,
             level: 1,
         }
     }
 
     pub fn insert(&mut self, key: K, val: V) {
-        let mut update: [Option<NonNull<Node<K, V>>>; MAX_LEVEL] = [None; MAX_LEVEL];
+        let mut update: [*mut Node<K, V>; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
 
         unsafe {
-            if let Some(mut node_ptr) = self.find_gt_or_eq_node(&key, &mut update) {
-                let node = node_ptr.as_mut();
-                if node.key == key {
-                    node.val = val;
-                    return;
-                }
+            let node_ptr = self.find_gt_or_eq_node(&key, &mut update);
+            if !node_ptr.is_null() && (*node_ptr).key == key {
+                (*node_ptr).val = val;
+                return;
             }
         }
 
         let level = rand_lvl();
         if level > self.level {
             for i in self.level..level {
-                update[i] = Some(self.head);
+                update[i] = self.head;
             }
             self.level = level;
         }
@@ -125,8 +123,8 @@ impl<K: Ord, V> SkipList<K, V> {
 
         for i in 0..level {
             unsafe {
-                x.unwrap().as_mut().tower[i] = update[i].unwrap().as_ref().tower[i];
-                update[i].unwrap().as_mut().tower[i] = x;
+                (*x).tower[i] = (*update[i]).tower[i];
+                (*update[i]).tower[i] = x;
             }
         }
 
@@ -134,28 +132,22 @@ impl<K: Ord, V> SkipList<K, V> {
     }
 
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let mut update: [Option<NonNull<Node<K, V>>>; MAX_LEVEL] = [None; MAX_LEVEL];
+        let mut update: [*mut Node<K, V>; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         unsafe {
-            if let Some(mut node_ptr) = self.find_gt_or_eq_node(key, &mut update) {
-                return if node_ptr.as_ref().key == *key {
-                    Some(&mut node_ptr.as_mut().val)
-                } else {
-                    None
-                };
+            let node_ptr = self.find_gt_or_eq_node(key, &mut update);
+            if !node_ptr.is_null() && (*node_ptr).key == *key {
+                return Some(&mut (*node_ptr).val);
             }
         }
         None
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
-        let mut update: [Option<NonNull<Node<K, V>>>; MAX_LEVEL] = [None; MAX_LEVEL];
+        let mut update: [*mut Node<K, V>; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         unsafe {
-            if let Some(mut node_ptr) = self.find_gt_or_eq_node(key, &mut update) {
-                return if node_ptr.as_ref().key == *key {
-                    Some(&node_ptr.as_mut().val)
-                } else {
-                    None
-                };
+            let node_ptr = self.find_gt_or_eq_node(key, &mut update);
+            if !node_ptr.is_null() && (*node_ptr).key == *key {
+                return Some(&(*node_ptr).val);
             }
             None
         }
@@ -168,13 +160,17 @@ impl<K: Ord, V> SkipList<K, V> {
     unsafe fn find_gt_or_eq_node(
         &self,
         key: &K,
-        update: &mut [Option<NonNull<Node<K, V>>>; MAX_LEVEL],
-    ) -> Option<NonNull<Node<K, V>>> {
-        let mut x = Some(self.head);
+        update: &mut [*mut Node<K, V>; MAX_LEVEL],
+    ) -> *mut Node<K, V> {
+        let mut x = self.head;
         for i in (0..self.level).rev() {
-            while let Some(node_ptr) = x.unwrap().as_ref().tower[i] {
-                if node_ptr.as_ref().key < *key {
-                    x = x.unwrap().as_ref().tower[i];
+            loop {
+                let node_ptr = (*x).tower[i];
+                if node_ptr.is_null() {
+                    break;
+                }
+                if (*node_ptr).key < *key {
+                    x = (*x).tower[i];
                 } else {
                     break;
                 }
@@ -182,20 +178,20 @@ impl<K: Ord, V> SkipList<K, V> {
             update[i] = x;
         }
 
-        return x.unwrap().as_ref().tower[0];
+        return (*x).tower[0];
     }
 }
 
 impl<K, V> Drop for SkipList<K, V> {
     fn drop(&mut self) {
         unsafe {
-            let mut x = self.head.as_mut().tower[0];
-            while let Some(node_ptr) = x {
-                let t = node_ptr.as_ref().tower[0];
-                dealloc(node_ptr.as_ptr() as *mut u8, node_ptr.as_ref().layout);
+            let mut x = (*self.head).tower[0];
+            while !x.is_null() {
+                let t = (*x).tower[0];
+                dealloc(x as *mut u8, (*x).layout);
                 x = t;
             }
-            dealloc(self.head.as_ptr() as *mut u8, self.head.as_ref().layout);
+            dealloc(self.head as *mut u8, (*self.head).layout);
         }
     }
 }
@@ -208,21 +204,21 @@ mod tests {
         let mut sk = SkipList::new();
         assert_eq!(sk.len(), 0);
 
-        for i in 0..10 {
+        for i in 0..100 {
             sk.insert(i, i);
         }
-        assert_eq!(sk.len(), 10);
-        for i in 0..10 {
+        assert_eq!(sk.len(), 100);
+        for i in 0..100 {
             let k = i;
             let mut v = i;
             assert_eq!(sk.get_mut(&k), Some(&mut v));
         }
 
-        for i in 0..10 {
+        for i in 0..100 {
             sk.insert(i, i + 1);
         }
-        assert_eq!(sk.len(), 10);
-        for i in 0..10 {
+        assert_eq!(sk.len(), 100);
+        for i in 0..100 {
             let k = i;
             let v = i + 1;
             assert_eq!(sk.get(&k), Some(&v));
